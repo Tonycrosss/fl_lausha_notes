@@ -50,6 +50,8 @@ class Database:
         CREATE TABLE IF NOT EXISTS authors (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
+            channel_title TEXT,
+            channel_url TEXT,
             is_active INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL
         );
@@ -83,6 +85,15 @@ class Database:
             FOREIGN KEY (broadcast_id) REFERENCES broadcasts(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS broadcast_authors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            broadcast_id INTEGER NOT NULL,
+            author_id INTEGER NOT NULL,
+            UNIQUE(broadcast_id, author_id),
+            FOREIGN KEY (broadcast_id) REFERENCES broadcasts(id) ON DELETE CASCADE,
+            FOREIGN KEY (author_id) REFERENCES authors(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS broadcast_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             broadcast_id INTEGER NOT NULL,
@@ -95,8 +106,27 @@ class Database:
         );
         """
         await self.connection.executescript(schema)
+        await self._ensure_column("authors", "channel_title", "TEXT")
+        await self._ensure_column("authors", "channel_url", "TEXT")
+        await self.connection.execute(
+            """
+            INSERT OR IGNORE INTO broadcast_authors (broadcast_id, author_id)
+            SELECT id, author_id
+            FROM broadcasts
+            WHERE author_id IS NOT NULL
+            """
+        )
         await self.connection.commit()
         logger.info("Database schema initialized")
+
+    async def _ensure_column(self, table_name: str, column_name: str, column_definition: str) -> None:
+        rows = await self.fetchall(f"PRAGMA table_info({table_name})")
+        existing_columns = {str(row["name"]) for row in rows}
+        if column_name in existing_columns:
+            return
+        await self.connection.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
+        )
 
     async def execute(self, query: str, params: tuple[Any, ...] = ()) -> aiosqlite.Cursor:
         cursor = await self.connection.execute(query, params)

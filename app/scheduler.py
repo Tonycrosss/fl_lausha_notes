@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from html import escape
 import logging
 from datetime import datetime
 
@@ -17,6 +18,22 @@ from app.models_logic import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def format_broadcast_authors(author_names: list[str]) -> str:
+    return ", ".join(author_names)
+
+
+def format_author_links(authors) -> str:
+    lines: list[str] = []
+    for author in authors:
+        if author.channel_url and author.channel_title:
+            lines.append(f'• <a href="{escape(author.channel_url, quote=True)}">{escape(author.channel_title)}</a>')
+        elif author.channel_title:
+            lines.append(f"• {escape(author.channel_title)}")
+        else:
+            lines.append(f"• {escape(author.name)}")
+    return "\n".join(lines)
 
 
 class BroadcastScheduler:
@@ -98,11 +115,15 @@ class BroadcastScheduler:
         if broadcast is None or broadcast.status != STATUS_SCHEDULED:
             return
 
-        recipients = await self.repository.get_broadcast_recipients(broadcast.author_id)
+        recipients = await self.repository.get_broadcast_recipients(broadcast.id)
+        authors = await self.repository.get_broadcast_authors(broadcast.id)
+        authors_text = format_broadcast_authors(broadcast.author_names)
+        author_links = format_author_links(authors)
         text = (
             f"Скоро будет рассылка материалов.\n\n"
-            f"Автор: {broadcast.author_name}\n"
-            f"Рассылка: {broadcast.title}\n"
+            f"Авторы: {escape(authors_text)}\n"
+            f"Каналы:\n{author_links}\n\n"
+            f"Рассылка: {escape(broadcast.title)}\n"
             f"Время отправки: {broadcast.send_at}"
         )
 
@@ -125,15 +146,21 @@ class BroadcastScheduler:
         if broadcast is None or broadcast.status == STATUS_SENT:
             return
 
-        recipients = await self.repository.get_broadcast_recipients(broadcast.author_id)
+        recipients = await self.repository.get_broadcast_recipients(broadcast.id)
         files = await self.repository.get_broadcast_files(broadcast_id)
+        authors = await self.repository.get_broadcast_authors(broadcast.id)
+        authors_text = format_broadcast_authors(broadcast.author_names)
+        author_links = format_author_links(authors)
 
         for recipient in recipients:
             user_id = int(recipient["id"])
             try:
                 await self.bot.send_message(
                     recipient["telegram_id"],
-                    f"Материалы по автору {broadcast.author_name}.\n\n{broadcast.title}",
+                    "Материалы по авторам:\n"
+                    f"{escape(authors_text)}\n\n"
+                    f"Каналы:\n{author_links}\n\n"
+                    f"{escape(broadcast.title)}",
                 )
                 for file in files:
                     await self.bot.send_document(

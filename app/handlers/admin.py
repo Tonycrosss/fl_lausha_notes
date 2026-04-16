@@ -10,25 +10,25 @@ from aiogram.types import CallbackQuery, Document, Message
 
 from app.keyboards import (
     admin_menu_keyboard,
+    author_detail_keyboard,
     authors_manage_keyboard,
-    authors_select_keyboard,
     back_keyboard,
+    broadcast_authors_keyboard,
     broadcast_confirmation_keyboard,
     delete_broadcast_keyboard,
     done_files_keyboard,
     scheduled_broadcasts_keyboard,
 )
-from app.models_logic import DATETIME_FORMAT, Repository, parse_datetime
+from app.models_logic import DATETIME_FORMAT, Repository, normalize_channel_url, parse_datetime
 from app.scheduler import BroadcastScheduler
-from app.states import AddAuthorStates, CreateBroadcastStates
+from app.states import AddAuthorStates, CreateBroadcastStates, EditAuthorStates
 
 router = Router()
 logger = logging.getLogger(__name__)
 
 
 def is_admin(message: Message | CallbackQuery, admin_telegram_id: int) -> bool:
-    user_id = message.from_user.id if isinstance(message, CallbackQuery) else message.from_user.id
-    return user_id == admin_telegram_id
+    return message.from_user.id == admin_telegram_id
 
 
 def format_authors_manage_text(authors) -> str:
@@ -41,12 +41,29 @@ def format_authors_manage_text(authors) -> str:
     return "\n".join(lines)
 
 
-def format_broadcast_preview(data: dict, author_name: str) -> str:
+def format_author_detail(author) -> str:
+    status = "активен" if author.is_active else "отключен"
+    channel_title = author.channel_title or "не задано"
+    channel_url = author.channel_url or "не задано"
+    return (
+        f"Автор: {author.name}\n"
+        f"Статус: {status}\n"
+        f"Название канала: {channel_title}\n"
+        f"Ссылка канала: {channel_url}"
+    )
+
+
+def format_selected_authors(authors: list[str]) -> str:
+    return "\n".join(f"• {author}" for author in authors) if authors else "Пока никто не выбран"
+
+
+def format_broadcast_preview(data: dict) -> str:
     files = data.get("files", [])
     file_lines = "\n".join(f"• {item['file_name']}" for item in files) if files else "Файлы не загружены"
+    author_lines = format_selected_authors(list(data.get("author_names", [])))
     return (
         "Подтвердите создание рассылки.\n\n"
-        f"Автор: {author_name}\n"
+        f"Авторы:\n{author_lines}\n"
         f"Название: {data['title']}\n"
         f"Уведомление: {data['notify_at']}\n"
         f"Отправка: {data['send_at']}\n"
@@ -56,6 +73,14 @@ def format_broadcast_preview(data: dict, author_name: str) -> str:
 
 async def show_admin_menu(message: Message) -> None:
     await message.answer("Панель администратора", reply_markup=admin_menu_keyboard())
+
+
+async def show_authors_list(target_message: Message, repository: Repository) -> None:
+    authors = await repository.get_all_authors()
+    await target_message.answer(
+        format_authors_manage_text(authors),
+        reply_markup=authors_manage_keyboard(authors),
+    )
 
 
 @router.message(Command("admin"))
@@ -73,12 +98,23 @@ async def authors_menu_handler(
 ) -> None:
     if not is_admin(message, admin_telegram_id):
         return
+    await show_authors_list(message, repository)
 
+
+@router.callback_query(F.data == "admin:author:list")
+async def authors_list_callback(
+    callback: CallbackQuery,
+    repository: Repository,
+    admin_telegram_id: int,
+) -> None:
+    if not is_admin(callback, admin_telegram_id):
+        return
     authors = await repository.get_all_authors()
-    await message.answer(
+    await callback.message.edit_text(
         format_authors_manage_text(authors),
         reply_markup=authors_manage_keyboard(authors),
     )
+    await callback.answer()
 
 
 @router.callback_query(F.data == "admin:add_author")
@@ -89,16 +125,16 @@ async def add_author_prompt(
 ) -> None:
     if not is_admin(callback, admin_telegram_id):
         return
+    await state.clear()
     await state.set_state(AddAuthorStates.waiting_for_name)
     await callback.message.answer("Введите имя нового автора.", reply_markup=back_keyboard())
     await callback.answer()
 
 
 @router.message(AddAuthorStates.waiting_for_name)
-async def add_author_handler(
+async def add_author_name_handler(
     message: Message,
     state: FSMContext,
-    repository: Repository,
     admin_telegram_id: int,
 ) -> None:
     if not is_admin(message, admin_telegram_id):
@@ -113,8 +149,64 @@ async def add_author_handler(
         await message.answer("Имя автора не должно быть пустым.")
         return
 
+    await state.update_data(author_name=message.text.strip())
+    await state.set_state(AddAuthorStates.waiting_for_channel_title)
+    await message.answer("Введите название канала, которое увидит пользователь.")
+
+
+@router.message(AddAuthorStates.waiting_for_channel_title)
+async def add_author_channel_title_handler(
+    message: Message,
+    state: FSMContext,
+    admin_telegram_id: int,
+) -> None:
+    if not is_admin(message, admin_telegram_id):
+        return
+
+    if message.text == "Назад":
+        await state.set_state(AddAuthorStates.waiting_for_name)
+        await message.answer("Введите имя автора.")
+        return
+
+    if not message.text or not message.text.strip():
+        await message.answer("Название канала не должно быть пустым.")
+        return
+
+    await state.update_data(channel_title=message.text.strip())
+    await state.set_state(AddAuthorStates.waiting_for_channel_url)
+    await message.answer("Введите ссылку на канал. Например: https://t.me/example или @example")
+
+
+@router.message(AddAuthorStates.waiting_for_channel_url)
+async def add_author_channel_url_handler(
+    message: Message,
+    state: FSMContext,
+    repository: Repository,
+    admin_telegram_id: int,
+) -> None:
+    if not is_admin(message, admin_telegram_id):
+        return
+
+    if message.text == "Назад":
+        await state.set_state(AddAuthorStates.waiting_for_channel_title)
+        await message.answer("Введите название канала.")
+        return
+
+    if not message.text or not message.text.strip():
+        await message.answer("Ссылка канала не должна быть пустой.")
+        return
+
     try:
-        author_id = await repository.create_author(message.text)
+        normalized_url = normalize_channel_url(message.text)
+        data = await state.get_data()
+        author_id = await repository.create_author(
+            name=str(data["author_name"]),
+            channel_title=str(data["channel_title"]),
+            channel_url=normalized_url,
+        )
+    except ValueError:
+        await message.answer("Некорректная ссылка. Используйте https://t.me/... или @username")
+        return
     except Exception as exc:
         logger.exception("Failed to create author: %s", exc)
         await message.answer("Не удалось добавить автора. Возможно, такое имя уже существует.")
@@ -124,7 +216,30 @@ async def add_author_handler(
     await message.answer(f"Автор добавлен. ID: {author_id}", reply_markup=admin_menu_keyboard())
 
 
-@router.callback_query(F.data.startswith("admin:author:"))
+@router.callback_query(F.data.startswith("admin:author:view:"))
+async def author_view_handler(
+    callback: CallbackQuery,
+    repository: Repository,
+    admin_telegram_id: int,
+) -> None:
+    if not is_admin(callback, admin_telegram_id):
+        return
+
+    author_id = int(callback.data.split(":")[-1])
+    author = await repository.get_author(author_id)
+    if author is None:
+        await callback.answer("Автор не найден", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        format_author_detail(author),
+        reply_markup=author_detail_keyboard(author),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:author:deactivate:"))
+@router.callback_query(F.data.startswith("admin:author:activate:"))
 async def author_toggle_handler(
     callback: CallbackQuery,
     repository: Repository,
@@ -136,12 +251,137 @@ async def author_toggle_handler(
     _, _, action, author_id_str = callback.data.split(":")
     author_id = int(author_id_str)
     await repository.set_author_status(author_id, action == "activate")
-    authors = await repository.get_all_authors()
+    author = await repository.get_author(author_id)
+    if author is None:
+        await callback.answer("Автор не найден", show_alert=True)
+        return
+
     await callback.message.edit_text(
-        format_authors_manage_text(authors),
-        reply_markup=authors_manage_keyboard(authors),
+        format_author_detail(author),
+        reply_markup=author_detail_keyboard(author),
     )
     await callback.answer("Статус автора обновлен")
+
+
+@router.callback_query(F.data.startswith("admin:author:edit_title:"))
+async def author_edit_title_prompt(
+    callback: CallbackQuery,
+    state: FSMContext,
+    repository: Repository,
+    admin_telegram_id: int,
+) -> None:
+    if not is_admin(callback, admin_telegram_id):
+        return
+
+    author_id = int(callback.data.split(":")[-1])
+    author = await repository.get_author(author_id)
+    if author is None:
+        await callback.answer("Автор не найден", show_alert=True)
+        return
+
+    await state.clear()
+    await state.update_data(edit_author_id=author_id)
+    await state.set_state(EditAuthorStates.waiting_for_channel_title)
+    await callback.message.answer(
+        f"Введите новое название канала для автора {author.name}.",
+        reply_markup=back_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:author:edit_url:"))
+async def author_edit_url_prompt(
+    callback: CallbackQuery,
+    state: FSMContext,
+    repository: Repository,
+    admin_telegram_id: int,
+) -> None:
+    if not is_admin(callback, admin_telegram_id):
+        return
+
+    author_id = int(callback.data.split(":")[-1])
+    author = await repository.get_author(author_id)
+    if author is None:
+        await callback.answer("Автор не найден", show_alert=True)
+        return
+
+    await state.clear()
+    await state.update_data(edit_author_id=author_id)
+    await state.set_state(EditAuthorStates.waiting_for_channel_url)
+    await callback.message.answer(
+        f"Введите новую ссылку канала для автора {author.name}.",
+        reply_markup=back_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(EditAuthorStates.waiting_for_channel_title)
+async def author_edit_title_handler(
+    message: Message,
+    state: FSMContext,
+    repository: Repository,
+    admin_telegram_id: int,
+) -> None:
+    if not is_admin(message, admin_telegram_id):
+        return
+
+    data = await state.get_data()
+    author_id = int(data["edit_author_id"])
+
+    if message.text == "Назад":
+        await state.clear()
+        author = await repository.get_author(author_id)
+        if author:
+            await message.answer(format_author_detail(author), reply_markup=author_detail_keyboard(author))
+        return
+
+    if not message.text or not message.text.strip():
+        await message.answer("Название канала не должно быть пустым.")
+        return
+
+    await repository.update_author_channel_title(author_id, message.text.strip())
+    await state.clear()
+    author = await repository.get_author(author_id)
+    await message.answer("Название канала обновлено.", reply_markup=admin_menu_keyboard())
+    if author:
+        await message.answer(format_author_detail(author), reply_markup=author_detail_keyboard(author))
+
+
+@router.message(EditAuthorStates.waiting_for_channel_url)
+async def author_edit_url_handler(
+    message: Message,
+    state: FSMContext,
+    repository: Repository,
+    admin_telegram_id: int,
+) -> None:
+    if not is_admin(message, admin_telegram_id):
+        return
+
+    data = await state.get_data()
+    author_id = int(data["edit_author_id"])
+
+    if message.text == "Назад":
+        await state.clear()
+        author = await repository.get_author(author_id)
+        if author:
+            await message.answer(format_author_detail(author), reply_markup=author_detail_keyboard(author))
+        return
+
+    if not message.text or not message.text.strip():
+        await message.answer("Ссылка канала не должна быть пустой.")
+        return
+
+    try:
+        await repository.update_author_channel_url(author_id, message.text.strip())
+    except ValueError:
+        await message.answer("Некорректная ссылка. Используйте https://t.me/... или @username")
+        return
+
+    await state.clear()
+    author = await repository.get_author(author_id)
+    await message.answer("Ссылка канала обновлена.", reply_markup=admin_menu_keyboard())
+    if author:
+        await message.answer(format_author_detail(author), reply_markup=author_detail_keyboard(author))
 
 
 @router.message(F.text == "Новая рассылка")
@@ -161,14 +401,15 @@ async def new_broadcast_handler(
 
     await state.clear()
     await state.set_state(CreateBroadcastStates.waiting_for_author)
+    await state.update_data(author_ids=[], author_names=[], files=[])
     await message.answer(
-        "Выберите автора для рассылки.",
-        reply_markup=authors_select_keyboard(authors),
+        "Выберите одного или нескольких авторов для рассылки.",
+        reply_markup=broadcast_authors_keyboard(authors, []),
     )
 
 
-@router.callback_query(F.data.startswith("admin:broadcast_author:"))
-async def select_broadcast_author_handler(
+@router.callback_query(F.data.startswith("admin:broadcast_author:toggle:"))
+async def toggle_broadcast_author_handler(
     callback: CallbackQuery,
     state: FSMContext,
     repository: Repository,
@@ -183,7 +424,42 @@ async def select_broadcast_author_handler(
         await callback.answer("Автор недоступен", show_alert=True)
         return
 
-    await state.update_data(author_id=author.id, author_name=author.name, files=[])
+    data = await state.get_data()
+    selected_ids = list(data.get("author_ids", []))
+    if author.id in selected_ids:
+        selected_ids.remove(author.id)
+    else:
+        selected_ids.append(author.id)
+        selected_ids.sort()
+
+    selected_authors = await repository.get_authors_by_ids(selected_ids)
+    active_authors = await repository.get_active_authors()
+    await state.update_data(
+        author_ids=selected_ids,
+        author_names=[item.name for item in selected_authors],
+    )
+    await callback.message.edit_text(
+        "Выберите одного или нескольких авторов для рассылки.\n\n"
+        f"Сейчас выбрано:\n{format_selected_authors([item.name for item in selected_authors])}",
+        reply_markup=broadcast_authors_keyboard(active_authors, selected_ids),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:broadcast_author:done")
+async def finish_broadcast_authors_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+    admin_telegram_id: int,
+) -> None:
+    if not is_admin(callback, admin_telegram_id):
+        return
+
+    data = await state.get_data()
+    if not data.get("author_ids"):
+        await callback.answer("Выберите хотя бы одного автора", show_alert=True)
+        return
+
     await state.set_state(CreateBroadcastStates.waiting_for_title)
     await callback.message.answer("Введите название рассылки.", reply_markup=back_keyboard())
     await callback.answer()
@@ -349,17 +625,20 @@ async def broadcast_send_at_handler(
         await message.answer(error_text)
         return
 
-    await state.update_data(send_at=message.text.strip())
-    data = await state.get_data()
-    author = await repository.get_author(int(data["author_id"]))
-    if author is None:
+    author_ids = list(data.get("author_ids", []))
+    authors = await repository.get_authors_by_ids(author_ids)
+    if not authors:
         await state.clear()
-        await message.answer("Автор не найден. Начните создание рассылки заново.")
+        await message.answer("Авторы не найдены. Начните создание рассылки заново.")
         return
 
+    await state.update_data(
+        send_at=message.text.strip(),
+        author_names=[author.name for author in authors],
+    )
     await state.set_state(CreateBroadcastStates.waiting_for_confirmation)
     await message.answer(
-        format_broadcast_preview(data, author.name),
+        format_broadcast_preview(await state.get_data()),
         reply_markup=broadcast_confirmation_keyboard(),
     )
 
@@ -377,7 +656,7 @@ async def broadcast_confirm_handler(
 
     data = await state.get_data()
     broadcast_id = await repository.create_broadcast(
-        author_id=int(data["author_id"]),
+        author_ids=list(data["author_ids"]),
         title=str(data["title"]),
         notify_at=str(data["notify_at"]),
         send_at=str(data["send_at"]),
@@ -423,7 +702,7 @@ async def scheduled_broadcasts_handler(
         return
 
     lines = [
-        f"{item.id}. {item.author_name} | {item.title} | уведомление: {item.notify_at} | отправка: {item.send_at}"
+        f"{item.id}. {', '.join(item.author_names)} | {item.title} | уведомление: {item.notify_at} | отправка: {item.send_at}"
         for item in broadcasts
     ]
     await message.answer(
@@ -448,7 +727,7 @@ async def delete_broadcast_prompt_handler(
         return
 
     await callback.message.answer(
-        f"Удалить рассылку #{broadcast.id}?\n{broadcast.author_name} | {broadcast.title}",
+        f"Удалить рассылку #{broadcast.id}?\n{', '.join(broadcast.author_names)} | {broadcast.title}",
         reply_markup=delete_broadcast_keyboard(broadcast.id),
     )
     await callback.answer()

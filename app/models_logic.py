@@ -4,6 +4,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlparse
 
 from app.db import Database
 
@@ -20,6 +21,8 @@ STATUS_CANCELED = "canceled"
 class Author:
     id: int
     name: str
+    channel_title: str | None
+    channel_url: str | None
     is_active: bool
     created_at: str
 
@@ -28,7 +31,7 @@ class Author:
 class Broadcast:
     id: int
     author_id: int
-    author_name: str
+    author_names: list[str]
     title: str
     notify_at: str
     send_at: str
@@ -57,16 +60,29 @@ def row_to_author(row: Any) -> Author:
     return Author(
         id=row["id"],
         name=row["name"],
+        channel_title=row["channel_title"],
+        channel_url=row["channel_url"],
         is_active=bool(row["is_active"]),
         created_at=row["created_at"],
     )
 
 
+def normalize_channel_url(url: str) -> str:
+    value = url.strip()
+    if value.startswith("@"):
+        value = f"https://t.me/{value[1:]}"
+    parsed = urlparse(value)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise ValueError("Channel URL must start with https://")
+    return value
+
+
 def row_to_broadcast(row: Any) -> Broadcast:
+    raw_names = str(row["author_names"] or "").strip()
     return Broadcast(
         id=row["id"],
         author_id=row["author_id"],
-        author_name=row["author_name"],
+        author_names=[item for item in raw_names.split("||") if item],
         title=row["title"],
         notify_at=row["notify_at"],
         send_at=row["send_at"],
@@ -168,18 +184,48 @@ class Repository:
         rows = await self.db.fetchall("SELECT * FROM authors WHERE is_active = 1 ORDER BY id")
         return [row_to_author(row) for row in rows]
 
+    async def get_authors_by_ids(self, author_ids: list[int]) -> list[Author]:
+        if not author_ids:
+            return []
+        placeholders = ",".join("?" for _ in author_ids)
+        rows = await self.db.fetchall(
+            f"SELECT * FROM authors WHERE id IN ({placeholders}) ORDER BY name",
+            tuple(author_ids),
+        )
+        return [row_to_author(row) for row in rows]
+
     async def get_author(self, author_id: int) -> Author | None:
         row = await self.db.fetchone("SELECT * FROM authors WHERE id = ?", (author_id,))
         return row_to_author(row) if row else None
 
-    async def create_author(self, name: str) -> int:
+    async def create_author(self, name: str, channel_title: str, channel_url: str) -> int:
         cursor = await self.db.execute(
-            "INSERT INTO authors (name, is_active, created_at) VALUES (?, 1, ?)",
-            (name.strip(), now_str(self.tzinfo)),
+            """
+            INSERT INTO authors (name, channel_title, channel_url, is_active, created_at)
+            VALUES (?, ?, ?, 1, ?)
+            """,
+            (
+                name.strip(),
+                channel_title.strip(),
+                normalize_channel_url(channel_url),
+                now_str(self.tzinfo),
+            ),
         )
         author_id = int(cursor.lastrowid)
         await self.sync_active_authors_for_subscribed_users(author_id)
         return author_id
+
+    async def update_author_channel_title(self, author_id: int, channel_title: str) -> None:
+        await self.db.execute(
+            "UPDATE authors SET channel_title = ? WHERE id = ?",
+            (channel_title.strip(), author_id),
+        )
+
+    async def update_author_channel_url(self, author_id: int, channel_url: str) -> None:
+        await self.db.execute(
+            "UPDATE authors SET channel_url = ? WHERE id = ?",
+            (normalize_channel_url(channel_url), author_id),
+        )
 
     async def set_author_status(self, author_id: int, is_active: bool) -> None:
         await self.db.execute(
@@ -191,19 +237,22 @@ class Repository:
 
     async def create_broadcast(
         self,
-        author_id: int,
+        author_ids: list[int],
         title: str,
         notify_at: str,
         send_at: str,
         files: list[dict[str, str | None]],
     ) -> int:
+        if not author_ids:
+            raise ValueError("Broadcast must include at least one author")
+
         cursor = await self.db.execute(
             """
             INSERT INTO broadcasts (author_id, title, notify_at, send_at, status, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
-                author_id,
+                author_ids[0],
                 title.strip(),
                 notify_at,
                 send_at,
@@ -212,6 +261,15 @@ class Repository:
             ),
         )
         broadcast_id = int(cursor.lastrowid)
+
+        await self.db.executemany(
+            """
+            INSERT INTO broadcast_authors (broadcast_id, author_id)
+            VALUES (?, ?)
+            """,
+            [(broadcast_id, author_id) for author_id in sorted(set(author_ids))],
+        )
+
         await self.db.executemany(
             """
             INSERT INTO broadcast_files (broadcast_id, telegram_file_id, file_name, mime_type)
@@ -232,10 +290,15 @@ class Repository:
     async def get_scheduled_broadcasts(self) -> list[Broadcast]:
         rows = await self.db.fetchall(
             """
-            SELECT b.*, a.name AS author_name
+            SELECT
+                b.*,
+                COALESCE(GROUP_CONCAT(ba_name.name, '||'), legacy_author.name) AS author_names
             FROM broadcasts b
-            JOIN authors a ON a.id = b.author_id
+            LEFT JOIN broadcast_authors ba ON ba.broadcast_id = b.id
+            LEFT JOIN authors ba_name ON ba_name.id = ba.author_id
+            LEFT JOIN authors legacy_author ON legacy_author.id = b.author_id
             WHERE b.status IN (?, ?)
+            GROUP BY b.id
             ORDER BY b.send_at
             """,
             (STATUS_SCHEDULED, STATUS_NOTIFIED),
@@ -245,10 +308,15 @@ class Repository:
     async def get_broadcast(self, broadcast_id: int) -> Broadcast | None:
         row = await self.db.fetchone(
             """
-            SELECT b.*, a.name AS author_name
+            SELECT
+                b.*,
+                COALESCE(GROUP_CONCAT(ba_name.name, '||'), legacy_author.name) AS author_names
             FROM broadcasts b
-            JOIN authors a ON a.id = b.author_id
+            LEFT JOIN broadcast_authors ba ON ba.broadcast_id = b.id
+            LEFT JOIN authors ba_name ON ba_name.id = ba.author_id
+            LEFT JOIN authors legacy_author ON legacy_author.id = b.author_id
             WHERE b.id = ?
+            GROUP BY b.id
             """,
             (broadcast_id,),
         )
@@ -260,6 +328,29 @@ class Repository:
             (broadcast_id,),
         )
         return [row_to_broadcast_file(row) for row in rows]
+
+    async def get_broadcast_authors(self, broadcast_id: int) -> list[Author]:
+        rows = await self.db.fetchall(
+            """
+            SELECT a.*
+            FROM broadcast_authors ba
+            JOIN authors a ON a.id = ba.author_id
+            WHERE ba.broadcast_id = ?
+            ORDER BY a.name
+            """,
+            (broadcast_id,),
+        )
+        if rows:
+            return [row_to_author(row) for row in rows]
+
+        legacy_row = await self.db.fetchone(
+            "SELECT author_id FROM broadcasts WHERE id = ?",
+            (broadcast_id,),
+        )
+        if legacy_row is None:
+            return []
+        legacy_author = await self.get_author(int(legacy_row["author_id"]))
+        return [legacy_author] if legacy_author else []
 
     async def cancel_broadcast(self, broadcast_id: int) -> None:
         await self.db.execute(
@@ -273,18 +364,39 @@ class Repository:
             (status, broadcast_id),
         )
 
-    async def get_broadcast_recipients(self, author_id: int) -> list[dict[str, Any]]:
+    async def get_broadcast_recipients(self, broadcast_id: int) -> list[dict[str, Any]]:
         rows = await self.db.fetchall(
             """
-            SELECT u.id, u.telegram_id, u.full_name
+            SELECT DISTINCT u.id, u.telegram_id, u.full_name
+            FROM users u
+            JOIN user_authors ua ON ua.user_id = u.id
+            JOIN broadcast_authors ba ON ba.author_id = ua.author_id
+            WHERE ba.broadcast_id = ? AND u.is_subscribed = 1
+            ORDER BY u.id
+            """,
+            (broadcast_id,),
+        )
+        if rows:
+            return [dict(row) for row in rows]
+
+        legacy_row = await self.db.fetchone(
+            "SELECT author_id FROM broadcasts WHERE id = ?",
+            (broadcast_id,),
+        )
+        if legacy_row is None:
+            return []
+
+        legacy_rows = await self.db.fetchall(
+            """
+            SELECT DISTINCT u.id, u.telegram_id, u.full_name
             FROM users u
             JOIN user_authors ua ON ua.user_id = u.id
             WHERE ua.author_id = ? AND u.is_subscribed = 1
             ORDER BY u.id
             """,
-            (author_id,),
+            (int(legacy_row["author_id"]),),
         )
-        return [dict(row) for row in rows]
+        return [dict(row) for row in legacy_rows]
 
     async def add_broadcast_log(
         self,

@@ -5,6 +5,13 @@ from aiogram.fsm.state import State, StatesGroup
 
 class AddAuthorStates(StatesGroup):
     waiting_for_name = State()
+    waiting_for_channel_title = State()
+    waiting_for_channel_url = State()
+
+
+class EditAuthorStates(StatesGroup):
+    waiting_for_channel_title = State()
+    waiting_for_channel_url = State()
 
 
 class CreateBroadcastStates(StatesGroup):
