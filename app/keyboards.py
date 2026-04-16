@@ -32,6 +32,17 @@ def back_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def skip_back_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Пропустить")],
+            [KeyboardButton(text="Назад")],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
 def authors_manage_keyboard(authors: list[Author]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for author in authors:

@@ -33,6 +33,8 @@ class Broadcast:
     author_id: int
     author_names: list[str]
     title: str
+    announce_text: str | None
+    announce_photo_file_id: str | None
     notify_at: str
     send_at: str
     status: str
@@ -84,6 +86,8 @@ def row_to_broadcast(row: Any) -> Broadcast:
         author_id=row["author_id"],
         author_names=[item for item in raw_names.split("||") if item],
         title=row["title"],
+        announce_text=row["announce_text"],
+        announce_photo_file_id=row["announce_photo_file_id"],
         notify_at=row["notify_at"],
         send_at=row["send_at"],
         status=row["status"],
@@ -239,6 +243,8 @@ class Repository:
         self,
         author_ids: list[int],
         title: str,
+        announce_text: str | None,
+        announce_photo_file_id: str | None,
         notify_at: str,
         send_at: str,
         files: list[dict[str, str | None]],
@@ -248,12 +254,16 @@ class Repository:
 
         cursor = await self.db.execute(
             """
-            INSERT INTO broadcasts (author_id, title, notify_at, send_at, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO broadcasts (
+                author_id, title, announce_text, announce_photo_file_id, notify_at, send_at, status, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 author_ids[0],
                 title.strip(),
+                announce_text.strip() if announce_text else None,
+                announce_photo_file_id,
                 notify_at,
                 send_at,
                 STATUS_SCHEDULED,

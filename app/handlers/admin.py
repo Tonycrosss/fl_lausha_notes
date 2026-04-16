@@ -17,6 +17,7 @@ from app.keyboards import (
     broadcast_confirmation_keyboard,
     delete_broadcast_keyboard,
     done_files_keyboard,
+    skip_back_keyboard,
     scheduled_broadcasts_keyboard,
 )
 from app.models_logic import DATETIME_FORMAT, Repository, normalize_channel_url, parse_datetime
@@ -61,10 +62,14 @@ def format_broadcast_preview(data: dict) -> str:
     files = data.get("files", [])
     file_lines = "\n".join(f"• {item['file_name']}" for item in files) if files else "Файлы не загружены"
     author_lines = format_selected_authors(list(data.get("author_names", [])))
+    announce_photo = "да" if data.get("announce_photo_file_id") else "нет"
+    announce_text = data.get("announce_text") or "не задан"
     return (
         "Подтвердите создание рассылки.\n\n"
         f"Авторы:\n{author_lines}\n"
         f"Название: {data['title']}\n"
+        f"Фото анонса: {announce_photo}\n"
+        f"Текст анонса: {announce_text}\n"
         f"Уведомление: {data['notify_at']}\n"
         f"Отправка: {data['send_at']}\n"
         f"Файлы:\n{file_lines}"
@@ -401,7 +406,13 @@ async def new_broadcast_handler(
 
     await state.clear()
     await state.set_state(CreateBroadcastStates.waiting_for_author)
-    await state.update_data(author_ids=[], author_names=[], files=[])
+    await state.update_data(
+        author_ids=[],
+        author_names=[],
+        announce_photo_file_id=None,
+        announce_text=None,
+        files=[],
+    )
     await message.answer(
         "Выберите одного или нескольких авторов для рассылки.",
         reply_markup=broadcast_authors_keyboard(authors, []),
@@ -484,6 +495,81 @@ async def broadcast_title_handler(
         return
 
     await state.update_data(title=message.text.strip())
+    await state.set_state(CreateBroadcastStates.waiting_for_announce_photo)
+    await message.answer(
+        "Загрузите фото для анонса уведомления или нажмите Пропустить.",
+        reply_markup=skip_back_keyboard(),
+    )
+
+
+@router.message(CreateBroadcastStates.waiting_for_announce_photo, F.photo)
+async def broadcast_announce_photo_handler(
+    message: Message,
+    state: FSMContext,
+    admin_telegram_id: int,
+) -> None:
+    if not is_admin(message, admin_telegram_id):
+        return
+    photo = message.photo[-1]
+    await state.update_data(announce_photo_file_id=photo.file_id)
+    await state.set_state(CreateBroadcastStates.waiting_for_announce_text)
+    await message.answer(
+        "Введите текст анонса для уведомления или нажмите Пропустить.",
+        reply_markup=skip_back_keyboard(),
+    )
+
+
+@router.message(CreateBroadcastStates.waiting_for_announce_photo)
+async def broadcast_announce_photo_text_handler(
+    message: Message,
+    state: FSMContext,
+    admin_telegram_id: int,
+) -> None:
+    if not is_admin(message, admin_telegram_id):
+        return
+    if message.text == "Назад":
+        await state.set_state(CreateBroadcastStates.waiting_for_title)
+        await message.answer("Введите название рассылки заново.", reply_markup=back_keyboard())
+        return
+    if message.text == "Пропустить":
+        await state.update_data(announce_photo_file_id=None)
+        await state.set_state(CreateBroadcastStates.waiting_for_announce_text)
+        await message.answer(
+            "Введите текст анонса для уведомления или нажмите Пропустить.",
+            reply_markup=skip_back_keyboard(),
+        )
+        return
+    await message.answer("Отправьте фото или нажмите Пропустить.")
+
+
+@router.message(CreateBroadcastStates.waiting_for_announce_text)
+async def broadcast_announce_text_handler(
+    message: Message,
+    state: FSMContext,
+    admin_telegram_id: int,
+) -> None:
+    if not is_admin(message, admin_telegram_id):
+        return
+
+    if message.text == "Назад":
+        await state.set_state(CreateBroadcastStates.waiting_for_announce_photo)
+        await message.answer(
+            "Загрузите фото для анонса уведомления или нажмите Пропустить.",
+            reply_markup=skip_back_keyboard(),
+        )
+        return
+
+    if message.text == "Пропустить":
+        await state.update_data(announce_text=None)
+    else:
+        if not message.text or not message.text.strip():
+            await message.answer("Текст анонса не должен быть пустым. Либо нажмите Пропустить.")
+            return
+        if len(message.text.strip()) > 400:
+            await message.answer("Текст анонса слишком длинный. Для варианта с фото используйте до 400 символов.")
+            return
+        await state.update_data(announce_text=message.text.strip())
+
     await state.set_state(CreateBroadcastStates.waiting_for_files)
     await message.answer(
         "Загрузите один или несколько документов. Когда закончите, нажмите Готово.",
@@ -499,8 +585,11 @@ async def broadcast_files_back_handler(
 ) -> None:
     if not is_admin(message, admin_telegram_id):
         return
-    await state.set_state(CreateBroadcastStates.waiting_for_title)
-    await message.answer("Введите название рассылки заново.", reply_markup=back_keyboard())
+    await state.set_state(CreateBroadcastStates.waiting_for_announce_text)
+    await message.answer(
+        "Введите текст анонса для уведомления или нажмите Пропустить.",
+        reply_markup=skip_back_keyboard(),
+    )
 
 
 @router.message(CreateBroadcastStates.waiting_for_files, F.document)
@@ -658,6 +747,8 @@ async def broadcast_confirm_handler(
     broadcast_id = await repository.create_broadcast(
         author_ids=list(data["author_ids"]),
         title=str(data["title"]),
+        announce_text=data.get("announce_text"),
+        announce_photo_file_id=data.get("announce_photo_file_id"),
         notify_at=str(data["notify_at"]),
         send_at=str(data["send_at"]),
         files=list(data["files"]),

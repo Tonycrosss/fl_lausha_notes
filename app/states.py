@@ -17,6 +17,8 @@ class EditAuthorStates(StatesGroup):
 class CreateBroadcastStates(StatesGroup):
     waiting_for_author = State()
     waiting_for_title = State()
+    waiting_for_announce_photo = State()
+    waiting_for_announce_text = State()
     waiting_for_files = State()
     waiting_for_notify_at = State()
     waiting_for_send_at = State()

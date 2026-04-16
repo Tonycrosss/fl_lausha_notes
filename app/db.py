@@ -69,6 +69,8 @@ class Database:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             author_id INTEGER NOT NULL,
             title TEXT NOT NULL,
+            announce_text TEXT,
+            announce_photo_file_id TEXT,
             notify_at TEXT NOT NULL,
             send_at TEXT NOT NULL,
             status TEXT NOT NULL,
@@ -108,6 +110,8 @@ class Database:
         await self.connection.executescript(schema)
         await self._ensure_column("authors", "channel_title", "TEXT")
         await self._ensure_column("authors", "channel_url", "TEXT")
+        await self._ensure_column("broadcasts", "announce_text", "TEXT")
+        await self._ensure_column("broadcasts", "announce_photo_file_id", "TEXT")
         await self.connection.execute(
             """
             INSERT OR IGNORE INTO broadcast_authors (broadcast_id, author_id)

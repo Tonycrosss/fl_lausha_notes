@@ -36,6 +36,17 @@ def format_author_links(authors) -> str:
     return "\n".join(lines)
 
 
+def build_notify_text(broadcast, authors_text: str, author_links: str) -> str:
+    parts: list[str] = []
+    if broadcast.announce_text:
+        parts.append(escape(broadcast.announce_text))
+    parts.append(f"Авторы: {escape(authors_text)}")
+    parts.append(f"Каналы:\n{author_links}")
+    parts.append(f"Рассылка: {escape(broadcast.title)}")
+    parts.append(f"Время отправки: {broadcast.send_at}")
+    return "\n\n".join(parts)
+
+
 class BroadcastScheduler:
     def __init__(self, repository: Repository, bot: Bot, timezone) -> None:
         self.repository = repository
@@ -119,17 +130,18 @@ class BroadcastScheduler:
         authors = await self.repository.get_broadcast_authors(broadcast.id)
         authors_text = format_broadcast_authors(broadcast.author_names)
         author_links = format_author_links(authors)
-        text = (
-            f"Скоро будет рассылка материалов.\n\n"
-            f"Авторы: {escape(authors_text)}\n"
-            f"Каналы:\n{author_links}\n\n"
-            f"Рассылка: {escape(broadcast.title)}\n"
-            f"Время отправки: {broadcast.send_at}"
-        )
+        text = build_notify_text(broadcast, authors_text, author_links)
 
         for recipient in recipients:
             try:
-                await self.bot.send_message(recipient["telegram_id"], text)
+                if broadcast.announce_photo_file_id:
+                    await self.bot.send_photo(
+                        recipient["telegram_id"],
+                        photo=broadcast.announce_photo_file_id,
+                        caption=text[:1024],
+                    )
+                else:
+                    await self.bot.send_message(recipient["telegram_id"], text)
             except Exception as exc:
                 logger.exception(
                     "Failed to send notification for broadcast %s to user %s: %s",
