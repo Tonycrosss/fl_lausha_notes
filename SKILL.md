@@ -1,6 +1,6 @@
 ---
 name: lausha-notes-bot
-description: Use this skill when working on the Telegram MVP bot in this repository: aiogram 3 handlers, SQLite access via aiosqlite, APScheduler restore/send flow, admin FSM for broadcasts, and deployment updates for VPS/systemd.
+description: Use this skill when working on the Telegram MVP bot in this repository: aiogram 3 handlers, SQLite access via aiosqlite, multi-author broadcasts, author channel title/url management, APScheduler restore/send flow, and VPS/systemd deployment updates.
 ---
 
 # Lausha Notes Bot
@@ -23,18 +23,21 @@ Repository skill for the Telegram broadcast bot MVP.
 - `app/models_logic.py`: repository-style data access and business logic
 - `app/scheduler.py`: APScheduler integration, restore-on-start, notify/send jobs
 - `app/handlers/user.py`: `/start`, `/help`, subscription confirmation
-- `app/handlers/admin.py`: admin menu, author management, broadcast FSM
+- `app/handlers/admin.py`: admin menu, author CRUD, channel title/url editing, broadcast FSM
 - `app/keyboards.py`: reply and inline keyboards
 - `app/states.py`: FSM states
 
 ## Working rules
 
 - Keep the storage layer light. Prefer extending `Repository` in `app/models_logic.py` instead of adding an ORM.
+- Authors now carry channel metadata. Preserve `channel_title` and `channel_url` handling when changing author flows.
+- Broadcasts can target multiple authors through `broadcast_authors`. Do not collapse this back to single-author behavior by accident.
 - Scheduled broadcasts depend on string datetimes in `YYYY-MM-DD HH:MM` and a shared timezone from config. Preserve that format unless there is a deliberate migration.
 - Files are resent through Telegram `file_id`. Do not add local file persistence for MVP behavior.
 - When changing broadcast flow, check both scheduler paths:
   - restore from DB on startup
   - live scheduling after admin creates a broadcast
+- User-facing channel links are rendered as HTML links in bot messages. Keep escaping and URL validation intact.
 - If a new active author is added, subscribed users must still get automatic `user_authors` links.
 - Keep admin UX simple: inline or reply keyboards, short prompts, explicit back paths.
 
