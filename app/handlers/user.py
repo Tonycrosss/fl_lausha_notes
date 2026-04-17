@@ -57,13 +57,15 @@ async def get_missing_channel_titles(
         channel_title = author.channel_title or author.name
         if chat_id is None:
             private_link_titles.append(channel_title)
-            check_status = CHECK_STATUS_UNVERIFIABLE
+            if check_status != CHECK_STATUS_UNSUBSCRIBED:
+                check_status = CHECK_STATUS_UNVERIFIABLE
             logger.warning("Channel URL cannot be verified for author_id=%s url=%s", author.id, author.channel_url)
             continue
         try:
             member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
         except (TelegramForbiddenError, TelegramBadRequest) as exc:
-            check_status = CHECK_STATUS_UNVERIFIABLE
+            if check_status != CHECK_STATUS_UNSUBSCRIBED:
+                check_status = CHECK_STATUS_UNVERIFIABLE
             logger.warning("Failed to verify channel %s for user %s: %s", chat_id, user_id, exc)
             continue
 
@@ -74,16 +76,62 @@ async def get_missing_channel_titles(
     return missing_titles, private_link_titles, check_status
 
 
+async def sync_user_subscription_state(
+    repository: Repository,
+    bot: Bot,
+    user_id: int,
+    required_authors: list[Author],
+) -> tuple[list[str], list[str], str]:
+    if not required_authors:
+        await repository.confirm_subscription(user_id)
+        return [], [], CHECK_STATUS_SUBSCRIBED
+
+    missing_titles, private_link_titles, check_status = await get_missing_channel_titles(
+        bot=bot,
+        authors=required_authors,
+        user_id=user_id,
+    )
+
+    if check_status == CHECK_STATUS_UNSUBSCRIBED:
+        await repository.set_subscription_status(user_id, False)
+    elif check_status == CHECK_STATUS_SUBSCRIBED:
+        await repository.confirm_subscription(user_id)
+
+    return missing_titles, private_link_titles, check_status
+
+
 @router.message(Command("start"))
-async def start_handler(message: Message, repository: Repository) -> None:
+async def start_handler(message: Message, repository: Repository, bot: Bot) -> None:
     await repository.upsert_user(
         telegram_id=message.from_user.id,
         username=message.from_user.username,
         full_name=message.from_user.full_name,
     )
     user = await repository.get_user_by_telegram_id(message.from_user.id)
+    required_authors = await repository.get_required_channel_authors()
 
     if user and int(user["is_subscribed"]) == 1:
+        missing_titles, _, check_status = await sync_user_subscription_state(
+            repository=repository,
+            bot=bot,
+            user_id=message.from_user.id,
+            required_authors=required_authors,
+        )
+        if check_status == CHECK_STATUS_UNSUBSCRIBED:
+            await message.answer(
+                "Подписка на рассылку больше не подтверждена.\n\n"
+                "Нужно снова подписаться на обязательные каналы:\n"
+                f"{format_authors_list(missing_titles)}",
+                reply_markup=channels_subscription_keyboard(required_authors),
+            )
+            return
+        if check_status == CHECK_STATUS_UNVERIFIABLE:
+            await message.answer(
+                "Не удалось перепроверить подписку на каналы.\n\n"
+                f"{format_channel_requirements(required_authors)}",
+                reply_markup=channels_subscription_keyboard(required_authors) if required_authors else subscribe_keyboard(),
+            )
+            return
         authors = await repository.get_user_author_names(message.from_user.id)
         await message.answer(
             "Подписка на рассылку уже подтверждена.\n\n"
@@ -92,7 +140,6 @@ async def start_handler(message: Message, repository: Repository) -> None:
         )
         return
 
-    required_authors = await repository.get_required_channel_authors()
     await message.answer(
         "Добро пожаловать.\n\n"
         f"{format_channel_requirements(required_authors)}",
@@ -117,10 +164,11 @@ async def confirm_subscription_handler(
 ) -> None:
     required_authors = await repository.get_required_channel_authors()
     if required_authors:
-        missing_titles, private_link_titles, check_status = await get_missing_channel_titles(
+        missing_titles, private_link_titles, check_status = await sync_user_subscription_state(
+            repository=repository,
             bot=bot,
-            authors=required_authors,
             user_id=callback.from_user.id,
+            required_authors=required_authors,
         )
         if private_link_titles:
             await callback.answer(
@@ -155,7 +203,6 @@ async def confirm_subscription_handler(
             )
             return
 
-    await repository.confirm_subscription(callback.from_user.id)
     authors = await repository.get_user_author_names(callback.from_user.id)
     await callback.message.edit_text(
         "Подписка на рассылку подтверждена.\n"

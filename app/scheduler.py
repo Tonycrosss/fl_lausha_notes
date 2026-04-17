@@ -168,9 +168,10 @@ class BroadcastScheduler:
                 continue
 
             logger.warning(
-                "Skipping broadcast delivery for user %s because runtime subscription status is unverifiable",
+                "Keeping broadcast delivery for user %s because runtime subscription status is unverifiable",
                 telegram_id,
             )
+            filtered.append(recipient)
         return filtered
 
     async def process_notify(self, broadcast_id: int) -> None:
