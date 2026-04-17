@@ -74,9 +74,24 @@ def normalize_channel_url(url: str) -> str:
     if value.startswith("@"):
         value = f"https://t.me/{value[1:]}"
     parsed = urlparse(value)
-    if parsed.scheme != "https" or not parsed.netloc:
-        raise ValueError("Channel URL must start with https://")
-    return value
+    if parsed.scheme != "https" or parsed.netloc not in {"t.me", "www.t.me"}:
+        raise ValueError("Channel URL must point to t.me")
+    path = parsed.path.strip("/")
+    if not path or "/" in path or path.startswith("+"):
+        raise ValueError("Channel URL must contain a public username")
+    return f"https://t.me/{path}"
+
+
+def extract_channel_username(channel_url: str | None) -> str | None:
+    if not channel_url:
+        return None
+    parsed = urlparse(channel_url.strip())
+    if parsed.netloc not in {"t.me", "www.t.me"}:
+        return None
+    path = parsed.path.strip("/")
+    if not path or "/" in path or path.startswith("+"):
+        return None
+    return f"@{path}"
 
 
 def row_to_broadcast(row: Any) -> Broadcast:
@@ -186,6 +201,17 @@ class Repository:
 
     async def get_active_authors(self) -> list[Author]:
         rows = await self.db.fetchall("SELECT * FROM authors WHERE is_active = 1 ORDER BY id")
+        return [row_to_author(row) for row in rows]
+
+    async def get_required_channel_authors(self) -> list[Author]:
+        rows = await self.db.fetchall(
+            """
+            SELECT *
+            FROM authors
+            WHERE is_active = 1 AND channel_url IS NOT NULL AND TRIM(channel_url) != ''
+            ORDER BY id
+            """
+        )
         return [row_to_author(row) for row in rows]
 
     async def get_authors_by_ids(self, author_ids: list[int]) -> list[Author]:

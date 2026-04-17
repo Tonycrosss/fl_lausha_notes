@@ -1,6 +1,6 @@
 ---
 name: lausha-notes-bot
-description: Use this skill when working on the Telegram MVP bot in this repository: aiogram 3 handlers, SQLite access via aiosqlite, multi-author broadcasts, author channel title/url management, photo-and-text notify announcements, APScheduler restore/send flow, and VPS/systemd deployment updates.
+description: Use this skill when working on the Telegram MVP bot in this repository: aiogram 3 handlers, SQLite access via aiosqlite, channel-subscription gating before broadcast access, multi-author broadcasts, author channel title/url management, photo-and-text notify announcements, APScheduler restore/send flow, and VPS/systemd deployment updates.
 ---
 
 # Lausha Notes Bot
@@ -22,7 +22,7 @@ Repository skill for the Telegram broadcast bot MVP.
 - `app/db.py`: SQLite connection and schema bootstrap
 - `app/models_logic.py`: repository-style data access and business logic
 - `app/scheduler.py`: APScheduler integration, restore-on-start, notify/send jobs
-- `app/handlers/user.py`: `/start`, `/help`, subscription confirmation
+- `app/handlers/user.py`: `/start`, `/help`, required-channel subscription check before broadcast access
 - `app/handlers/admin.py`: admin menu, author CRUD, channel title/url editing, broadcast FSM, optional notify photo/text
 - `app/keyboards.py`: reply and inline keyboards
 - `app/states.py`: FSM states
@@ -31,6 +31,9 @@ Repository skill for the Telegram broadcast bot MVP.
 
 - Keep the storage layer light. Prefer extending `Repository` in `app/models_logic.py` instead of adding an ORM.
 - Authors now carry channel metadata. Preserve `channel_title` and `channel_url` handling when changing author flows.
+- Access to the broadcast is now gated by verified channel subscriptions. Do not revert `/start` back to blind confirmation.
+- Channel verification relies on public `t.me/<username>` links and Telegram `getChatMember`. Private invite links are not enough for this flow.
+- Production checks require the bot to be an admin in the required channels; keep that assumption explicit in docs and ops notes.
 - Broadcasts can target multiple authors through `broadcast_authors`. Do not collapse this back to single-author behavior by accident.
 - Notify flow can include `announce_photo_file_id` and `announce_text` on the broadcast. Keep these fields optional.
 - Scheduled broadcasts depend on string datetimes in `YYYY-MM-DD HH:MM` and a shared timezone from config. Preserve that format unless there is a deliberate migration.
@@ -53,3 +56,5 @@ Repository skill for the Telegram broadcast bot MVP.
 
 - Never commit `.env`, `.venv`, or SQLite database files.
 - Update `README.md` when changing setup, environment variables, admin flow, or deployment steps.
+- Current VPS layout uses `/opt/fl_lausha_notes`.
+- Current systemd unit on the VPS is `fl-lausha-notes.service`.

@@ -8,10 +8,18 @@ from app.models_logic import Author, Broadcast
 
 def subscribe_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Подтвердить подписку", callback_data="user:confirm_subscription")]
-        ]
+        inline_keyboard=[[InlineKeyboardButton(text="Проверить подписку", callback_data="user:confirm_subscription")]]
     )
+
+
+def channels_subscription_keyboard(authors: list[Author]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for author in authors:
+        if author.channel_url:
+            title = author.channel_title or author.name
+            builder.row(InlineKeyboardButton(text=f"Подписаться: {title}", url=author.channel_url))
+    builder.row(InlineKeyboardButton(text="Проверить подписку", callback_data="user:confirm_subscription"))
+    return builder.as_markup()
 
 
 def admin_menu_keyboard() -> ReplyKeyboardMarkup:
