@@ -5,6 +5,7 @@ import logging
 from datetime import datetime
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
 
@@ -14,10 +15,14 @@ from app.models_logic import (
     STATUS_SENT,
     Broadcast,
     Repository,
+    extract_channel_username,
     parse_datetime,
 )
 
 logger = logging.getLogger(__name__)
+RUNTIME_STATUS_SUBSCRIBED = "subscribed"
+RUNTIME_STATUS_UNSUBSCRIBED = "unsubscribed"
+RUNTIME_STATUS_UNVERIFIABLE = "unverifiable"
 
 
 def format_broadcast_authors(author_names: list[str]) -> str:
@@ -121,6 +126,53 @@ class BroadcastScheduler:
                 )
             self.schedule_broadcast(broadcast)
 
+    async def _get_runtime_subscription_status(self, telegram_id: int, authors) -> str:
+        for author in authors:
+            chat_id = extract_channel_username(author.channel_url)
+            if chat_id is None:
+                logger.warning(
+                    "Skipping runtime subscription check for author_id=%s due to unverifiable channel_url=%s",
+                    author.id,
+                    author.channel_url,
+                )
+                return RUNTIME_STATUS_UNVERIFIABLE
+            try:
+                member = await self.bot.get_chat_member(chat_id=chat_id, user_id=telegram_id)
+            except (TelegramForbiddenError, TelegramBadRequest) as exc:
+                logger.warning(
+                    "Failed to re-check channel %s for user %s: %s",
+                    chat_id,
+                    telegram_id,
+                    exc,
+                )
+                return RUNTIME_STATUS_UNVERIFIABLE
+            if member.status in {"left", "kicked"}:
+                return RUNTIME_STATUS_UNSUBSCRIBED
+        return RUNTIME_STATUS_SUBSCRIBED
+
+    async def _filter_current_recipients(self, recipients: list[dict], authors) -> list[dict]:
+        filtered: list[dict] = []
+        for recipient in recipients:
+            telegram_id = int(recipient["telegram_id"])
+            subscription_status = await self._get_runtime_subscription_status(telegram_id, authors)
+            if subscription_status == RUNTIME_STATUS_SUBSCRIBED:
+                filtered.append(recipient)
+                continue
+
+            if subscription_status == RUNTIME_STATUS_UNSUBSCRIBED:
+                await self.repository.set_subscription_status(telegram_id, False)
+                logger.info(
+                    "Skipping broadcast delivery for user %s because channel subscription is no longer active",
+                    telegram_id,
+                )
+                continue
+
+            logger.warning(
+                "Skipping broadcast delivery for user %s because runtime subscription status is unverifiable",
+                telegram_id,
+            )
+        return filtered
+
     async def process_notify(self, broadcast_id: int) -> None:
         broadcast = await self.repository.get_broadcast(broadcast_id)
         if broadcast is None or broadcast.status != STATUS_SCHEDULED:
@@ -128,6 +180,7 @@ class BroadcastScheduler:
 
         recipients = await self.repository.get_broadcast_recipients(broadcast.id)
         authors = await self.repository.get_broadcast_authors(broadcast.id)
+        recipients = await self._filter_current_recipients(recipients, authors)
         authors_text = format_broadcast_authors(broadcast.author_names)
         author_links = format_author_links(authors)
         text = build_notify_text(broadcast, authors_text, author_links)
@@ -161,6 +214,7 @@ class BroadcastScheduler:
         recipients = await self.repository.get_broadcast_recipients(broadcast.id)
         files = await self.repository.get_broadcast_files(broadcast_id)
         authors = await self.repository.get_broadcast_authors(broadcast.id)
+        recipients = await self._filter_current_recipients(recipients, authors)
         authors_text = format_broadcast_authors(broadcast.author_names)
         author_links = format_author_links(authors)
 

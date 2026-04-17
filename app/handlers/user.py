@@ -13,6 +13,9 @@ from app.models_logic import Author, Repository, extract_channel_username
 
 router = Router()
 logger = logging.getLogger(__name__)
+CHECK_STATUS_SUBSCRIBED = "subscribed"
+CHECK_STATUS_UNSUBSCRIBED = "unsubscribed"
+CHECK_STATUS_UNVERIFIABLE = "unverifiable"
 
 
 def format_authors_list(authors: list[str]) -> str:
@@ -40,28 +43,35 @@ def format_channel_requirements(authors: list[Author]) -> str:
     )
 
 
-async def get_missing_channel_titles(bot: Bot, authors: list[Author], user_id: int) -> tuple[list[str], bool]:
+async def get_missing_channel_titles(
+    bot: Bot,
+    authors: list[Author],
+    user_id: int,
+) -> tuple[list[str], list[str], str]:
     missing_titles: list[str] = []
-    has_unverifiable_channels = False
+    private_link_titles: list[str] = []
+    check_status = CHECK_STATUS_SUBSCRIBED
 
     for author in authors:
         chat_id = extract_channel_username(author.channel_url)
         channel_title = author.channel_title or author.name
         if chat_id is None:
-            has_unverifiable_channels = True
+            private_link_titles.append(channel_title)
+            check_status = CHECK_STATUS_UNVERIFIABLE
             logger.warning("Channel URL cannot be verified for author_id=%s url=%s", author.id, author.channel_url)
             continue
         try:
             member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
         except (TelegramForbiddenError, TelegramBadRequest) as exc:
-            has_unverifiable_channels = True
+            check_status = CHECK_STATUS_UNVERIFIABLE
             logger.warning("Failed to verify channel %s for user %s: %s", chat_id, user_id, exc)
             continue
 
         if member.status in {"left", "kicked"}:
             missing_titles.append(channel_title)
+            check_status = CHECK_STATUS_UNSUBSCRIBED
 
-    return missing_titles, has_unverifiable_channels
+    return missing_titles, private_link_titles, check_status
 
 
 @router.message(Command("start"))
@@ -107,18 +117,32 @@ async def confirm_subscription_handler(
 ) -> None:
     required_authors = await repository.get_required_channel_authors()
     if required_authors:
-        missing_titles, has_unverifiable_channels = await get_missing_channel_titles(
+        missing_titles, private_link_titles, check_status = await get_missing_channel_titles(
             bot=bot,
             authors=required_authors,
             user_id=callback.from_user.id,
         )
-        if has_unverifiable_channels:
+        if private_link_titles:
             await callback.answer(
-                "Проверка недоступна. Добавьте бота в администраторы каналов и используйте публичные @username.",
+                "У части каналов сохранены приватные ссылки. Для проверки подписки нужны публичные @username у каналов.",
+                show_alert=True,
+            )
+            await callback.message.edit_text(
+                "Проверка подписки пока недоступна.\n\n"
+                "У этих каналов в настройках автора сохранены приватные invite-ссылки вместо публичных username:\n"
+                f"{format_authors_list(private_link_titles)}\n\n"
+                "Нужно обновить ссылки авторов на формат https://t.me/<username> или @username.",
+                reply_markup=channels_subscription_keyboard(required_authors),
+            )
+            return
+        if check_status == CHECK_STATUS_UNVERIFIABLE:
+            await callback.answer(
+                "Проверка недоступна. Проверьте, что бот админ во всех каналах и у каналов есть публичные @username.",
                 show_alert=True,
             )
             return
         if missing_titles:
+            await repository.set_subscription_status(callback.from_user.id, False)
             await callback.answer(
                 "Подписка найдена не на всех каналах. Откройте ссылки и повторите проверку.",
                 show_alert=True,

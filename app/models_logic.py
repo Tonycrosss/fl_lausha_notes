@@ -171,6 +171,12 @@ class Repository:
                 params,
             )
 
+    async def set_subscription_status(self, telegram_id: int, is_subscribed: bool) -> None:
+        await self.db.execute(
+            "UPDATE users SET is_subscribed = ? WHERE telegram_id = ?",
+            (1 if is_subscribed else 0, telegram_id),
+        )
+
     async def sync_active_authors_for_subscribed_users(self, author_id: int) -> None:
         users = await self.db.fetchall("SELECT id FROM users WHERE is_subscribed = 1")
         if not users:
