@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from html import escape
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -74,6 +75,42 @@ def format_broadcast_preview(data: dict) -> str:
         f"Отправка: {data['send_at']}\n"
         f"Файлы:\n{file_lines}"
     )
+
+
+def describe_broadcast_error(error_text: str | None) -> str:
+    if not error_text:
+        return "причина не записалась в лог"
+
+    normalized = error_text.lower()
+    if "bot was blocked by the user" in normalized:
+        return "пользователь заблокировал бота, поэтому Telegram не дает отправить ему сообщение"
+    if "chat not found" in normalized:
+        return "чат с пользователем недоступен для бота"
+    if "user is deactivated" in normalized:
+        return "аккаунт пользователя удален или деактивирован"
+    if "too many requests" in normalized or "retry after" in normalized:
+        return "Telegram временно ограничил отправку из-за частых запросов"
+    if "message is too long" in normalized:
+        return "сообщение получилось слишком длинным для Telegram"
+    return f"Telegram вернул ошибку: {error_text}"
+
+
+def format_error_details(error_details: list[dict]) -> str:
+    if not error_details:
+        return ""
+
+    lines = ["", "Подробности ошибок:"]
+    for detail in error_details:
+        username = detail.get("username")
+        name = detail.get("full_name") or "без имени"
+        user_label = f"{name}"
+        if username:
+            user_label += f" (@{username})"
+        user_label += f", ID {detail.get('telegram_id')}"
+        lines.append(
+            f"• {escape(user_label)}: {escape(describe_broadcast_error(detail.get('error_text')))}"
+        )
+    return "\n".join(lines)
 
 
 async def show_admin_menu(message: Message) -> None:
@@ -866,5 +903,6 @@ async def statistics_handler(
         f"Запланированных рассылок: {stats['scheduled_broadcasts_total']}\n"
         f"Успешных отправок в последней рассылке: {stats['last_broadcast_success_total']}\n"
         f"Ошибок отправки в последней рассылке: {stats['last_broadcast_error_total']}"
+        f"{format_error_details(stats['last_broadcast_error_details'])}"
     )
     await message.answer(text)

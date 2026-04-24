@@ -455,13 +455,13 @@ class Repository:
             (broadcast_id, user_id, status, error_text, now_str(self.tzinfo)),
         )
 
-    async def get_last_broadcast_stats(self) -> dict[str, int]:
+    async def get_last_broadcast_stats(self) -> dict[str, Any]:
         row = await self.db.fetchone(
             "SELECT id FROM broadcasts WHERE status = ? ORDER BY id DESC LIMIT 1",
             (STATUS_SENT,),
         )
         if row is None:
-            return {"success": 0, "errors": 0}
+            return {"success": 0, "errors": 0, "error_details": []}
 
         broadcast_id = int(row["id"])
         success_row = await self.db.fetchone(
@@ -480,12 +480,29 @@ class Repository:
             """,
             (broadcast_id,),
         )
+        error_rows = await self.db.fetchall(
+            """
+            SELECT
+                bl.error_text,
+                bl.created_at,
+                u.telegram_id,
+                u.username,
+                u.full_name
+            FROM broadcast_logs bl
+            JOIN users u ON u.id = bl.user_id
+            WHERE bl.broadcast_id = ? AND bl.status = 'error'
+            ORDER BY bl.id DESC
+            LIMIT 10
+            """,
+            (broadcast_id,),
+        )
         return {
             "success": int(success_row["total"]) if success_row else 0,
             "errors": int(errors_row["total"]) if errors_row else 0,
+            "error_details": [dict(row) for row in error_rows],
         }
 
-    async def get_statistics(self) -> dict[str, int]:
+    async def get_statistics(self) -> dict[str, Any]:
         users_row = await self.db.fetchone("SELECT COUNT(*) AS total FROM users")
         authors_row = await self.db.fetchone("SELECT COUNT(*) AS total FROM authors WHERE is_active = 1")
         scheduled_row = await self.db.fetchone(
@@ -503,4 +520,5 @@ class Repository:
             "scheduled_broadcasts_total": int(scheduled_row["total"]) if scheduled_row else 0,
             "last_broadcast_success_total": last_stats["success"],
             "last_broadcast_error_total": last_stats["errors"],
+            "last_broadcast_error_details": last_stats["error_details"],
         }
